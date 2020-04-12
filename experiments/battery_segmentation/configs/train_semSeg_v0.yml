@@ -1,0 +1,249 @@
+shortcuts:
+  z_size: &z_size 12
+  xy_size: &xy_size 272
+  xy_size_precrop: &xy_size_precrop 302
+  stride: &stride [10, 180, 180]
+
+# TODO: fix input shape (compatible with UNet factors); multi-inputs
+
+device: cuda
+
+loaders:
+  general:
+    volume_config:
+      volume_keys_to_load:
+        - raw
+        - GT
+
+    # Configuration for the master dataset.
+    transform_config:
+      # We might need order 0 interpolation if we have segmentation in there somewhere.
+      elastic_transform:
+        apply: False
+        alpha: 2000.
+        sigma: 50.
+        order: 0
+
+      random_flip: True
+
+
+      downscale_and_crop:
+        # Inputs:
+        - {ds_factor: [1, 1, 1],
+          crop_factor: [1, 1, 1],
+          apply_to: 0}
+        - {ds_factor: [2, 2, 2],
+          crop_factor: [1, 1, 1],
+          apply_to: 0}
+        # Targets:
+        - {ds_factor: [1, 1, 1],
+          crop_factor: [1, 1, 1],
+          apply_to: 1}
+#        - {ds_factor: [1, 2, 2],
+#          crop_factor: [1, 1, 1],
+#          apply_to: 1}
+#        - {ds_factor: [1, 4, 4],
+#          crop_factor: [1, 1, 1],
+#          apply_to: 1}
+
+
+    # Specify configuration for the loader
+    loader_config:
+      # Number of processes to use for loading data. Set to (say) 10 if you wish to
+      # use 10 CPU cores, or to 0 if you wish to use the same process for training and
+      # data-loading (generally not recommended).
+      batch_size: 1
+      num_workers: 1
+      drop_last: True
+      pin_memory: False
+      shuffle: True
+
+
+
+  train:
+    # Specify how the data needs to be sliced before feeding to the network.
+    # We use a 3D sliding window over the dataset to extract patches, which
+    # are then fed to the network as batches.
+    slicing_config:
+      # Sliding window size
+      window_size:
+        - *z_size
+        - *xy_size_precrop
+        - *xy_size_precrop
+      # Sliding window stride
+      stride: *stride
+      # Data slice to iterate over.
+      data_slice: ':, :, :'
+
+    # Specify paths to volumes
+    volume_config:
+      # Raw data
+      raw:
+        path: '$HCI_HOME/datasets/battery_data/raw_temp.h5'
+        path_in_file: 'data'
+        dtype: float32
+#        sigma: 0.025
+        padding_mode: "reflect"
+        padding: &dataset_padding [[2,2], [50,50], [50,50]]
+        is_multichannel: True
+
+      # Segmentation
+      GT:
+        path: '$HCI_HOME/datasets/battery_data/gt_temp.h5'
+        path_in_file: 'data'
+        dtype: int32
+        padding_mode: "constant"
+        padding: *dataset_padding
+
+
+  val:
+    slicing_config:
+      # Sliding window size
+      window_size:
+        - *z_size
+        - *xy_size_precrop
+        - *xy_size_precrop
+      # Sliding window stride
+      stride: *stride
+      # Data slice to iterate over.
+      data_slice: ':, :, :'
+
+    # Specify paths to volumes
+    volume_config:
+      # Raw data
+      raw:
+        path: '$HCI_HOME/datasets/battery_data/raw_temp.h5'
+        path_in_file: 'data'
+        dtype: float32
+        #        sigma: 0.025
+        padding_mode: "reflect"
+        padding: *dataset_padding
+        is_multichannel: True
+
+
+      # Segmentation
+      GT:
+        path: '$HCI_HOME/datasets/battery_data/gt_temp.h5'
+        path_in_file: 'data'
+        dtype: int32
+        padding_mode: "constant"
+        padding: *dataset_padding
+
+
+model:
+  model_class: confnets.models.MultiScaleInputMultiOutputUNet
+  model_kwargs:
+    decoder_fmaps: [48, 64, 128, 256]
+    return_input: True
+    number_multiscale_inputs: 2
+    in_channels: 2
+    depth: 3
+    res_blocks_specs: [[True], [True], [True], [True]]
+    encoder_fmaps: [32, 64, 128, 256]
+    upsampling_mode: 'nearest'
+#    return_input: True
+    scale_factor: [2, 2, 2]
+#    decoder_crops: # Crops AFTER the res_blocks at each level (at zero, we crop at the end)
+#      0: ":, 8:-8, 8:-8"
+#      1: ":, 4:-4, 4:-4"
+#      2: ":, 2:-2, 2:-2"
+    output_branches_specs:
+      global:
+        activation: Sigmoid
+#        nb_norm_groups: 16
+        out_channels: 4
+      0: {depth: 0}
+#      1: {depth: 1}
+#      2: {depth: 2}
+
+
+
+
+trainer:
+  max_epochs: 999 # basically infinite
+  num_targets: 1
+
+  criterion:
+    loss_name: "inferno.extensions.criteria.set_similarity_measures.SorensenDiceLoss"
+    kwargs: {}
+    transforms:
+      - neurofire.criteria.loss_transforms.RemoveSegmentationFromTarget: {}
+      - segmfriends.transform.volume.ApplyAndRemoveMask: {first_invert_target: True}
+
+  optimizer:
+    Adam:
+      lr: 0.0001
+      weight_decay: 0.0005
+      amsgrad: True
+#      betas: [0.9, 0.999]
+
+  intervals:
+    save_every: [1000, 'iterations']
+    validate_every:
+      frequency : [100, 'iterations']
+      for_num_iterations: 5
+
+  tensorboard:
+    log_scalars_every: [1, 'iterations']
+    log_images_every: [500, 'iterations']
+    log_histograms_every: 'never'
+    send_image_at_batch_indices: [0]
+    send_image_at_channel_indices: [0]
+
+  callbacks:
+#    gradients:
+#      LogOutputGradients:
+#        frequency: 1
+
+    essentials:
+      SaveAtBestValidationScore:
+        smoothness: 0
+        verbose: True
+      GarbageCollection: {}
+#      GradientClip:
+#        clip_value: 1e-3
+
+    scheduling:
+      AutoLR:
+        monitor: 'validation_loss'
+        factor: 0.99
+        patience: '100 iterations'
+        monitor_while: 'validating'
+        monitor_momentum: 0.75
+#        cooldown_duration: '50000 iterations'
+        consider_improvement_with_respect_to: 'previous'
+        verbose: True
+
+
+
+firelight:
+  affinities:
+    ImageGridVisualizer:
+
+      input_mapping:
+        global: [B: 0, D: "3:9"] # the mapping specified in 'global' is applied to all keys
+
+      pad_width: 1  # width of the border between images in pixels
+      pad_value: .2  # intensity of the border pixels
+      upsampling_factor: 1  # the whole grid is upsampled by this factor
+
+      row_specs: ['H', 'S', 'B', 'C', 'V']
+      column_specs: ['W', 'D']
+
+      visualizers:
+
+        - SegmentationVisualizer:
+            input: ['target', index: 0, C: 0]
+            background_label: 0
+        - IdentityVisualizer:
+            input: ['inputs', index: 0]
+            cmap: gray
+        - IdentityVisualizer:
+            input: ['prediction', index: 0, C: ":10"]
+            cmap: gray
+            value_range: [0,1]
+        - IdentityVisualizer:
+            input: ['target', index: 0, C: "1:11"]
+            cmap: gray_r
+            value_range: [0,1]
+
